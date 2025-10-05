@@ -4,7 +4,8 @@
  */
 
 import { prisma } from './db'
-import { createCachedFunction, CacheTags, CacheDurations } from './cache'
+import crypto from 'crypto'
+import { createCachedFunction, CacheDurations } from './cache'
 
 export interface WikiPage {
   id: string
@@ -18,6 +19,13 @@ export interface WikiPage {
   viewCount: number
   isRedirect: boolean
   redirectTarget: string | null
+  isNew: boolean
+  random: number
+  touched: Date | null
+  linksUpdated: Date | null
+  length: number
+  contentModel: string
+  lang: string | null
 }
 
 export interface WikiPageListItem {
@@ -73,6 +81,13 @@ async function _getPageBySlug(slug: string): Promise<WikiPage | null> {
     viewCount: page.viewCount,
     isRedirect: page.isRedirect,
     redirectTarget: page.redirectTarget,
+    isNew: page.isNew,
+    random: page.random,
+    touched: page.touched,
+    linksUpdated: page.linksUpdated,
+    length: page.length,
+    contentModel: page.contentModel,
+    lang: page.lang,
   }
 }
 
@@ -313,6 +328,7 @@ export async function incrementPageViews(slug: string) {
       viewCount: {
         increment: 1,
       },
+      touched: new Date(),
     },
   })
 }
@@ -565,7 +581,6 @@ export async function createPage(options: {
   }
   
   // Create or find existing text content
-  const crypto = require('crypto')
   const sha1 = crypto.createHash('sha1').update(content).digest('hex')
   
   let textContent = await prisma.textContent.findUnique({
@@ -583,6 +598,7 @@ export async function createPage(options: {
   }
   
   // Create page
+  const now = new Date()
   const page = await prisma.page.create({
     data: {
       namespaceId: namespaceRecord.id,
@@ -592,31 +608,54 @@ export async function createPage(options: {
       latestRevisionId: null, // Will be set after creating revision
       isRedirect: false,
       redirectTarget: null,
-      viewCount: 0
+      viewCount: 0,
+      isNew: true,
+      random: Math.random(),
+      touched: now,
+      linksUpdated: now,
+      length: textContent.byteSize,
+      contentModel: 'wikitext',
+      lang: 'en'
     }
   })
-  
+
   // Create initial revision
+  const commentText = summary || 'Initial creation'
+  const commentHash = crypto.createHash('sha1').update(commentText).digest('hex')
+  const comment = await prisma.comment.upsert({
+    where: { hash: commentHash },
+    create: {
+      text: commentText,
+      hash: commentHash
+    },
+    update: {}
+  })
   const revision = await prisma.revision.create({
     data: {
       pageId: page.id,
       textId: textContent.id,
       actorId: actor.id,
-      summary: summary || 'Initial creation',
+      summary: commentText,
       revisionNumber: 1,
-      timestamp: new Date(),
-      isMinor: false
+      timestamp: now,
+      isMinor: false,
+      commentId: comment.id,
+      byteSize: textContent.byteSize,
+      sha1,
+      contentModel: 'wikitext',
+      contentFormat: 'text/x-wiki'
     }
   })
-  
+
   // Update page with latest revision
   await prisma.page.update({
     where: { id: page.id },
     data: {
-      latestRevisionId: revision.id
+      latestRevisionId: revision.id,
+      length: textContent.byteSize
     }
   })
-  
+
   // Create recent change entry
   await prisma.recentChange.create({
     data: {
@@ -663,7 +702,10 @@ export async function updatePage(options: {
     include: {
       revisions: {
         orderBy: { revisionNumber: 'desc' },
-        take: 1
+        take: 1,
+        include: {
+          textContent: true
+        }
       }
     }
   })
@@ -698,7 +740,6 @@ export async function updatePage(options: {
   }
   
   // Create or find existing text content
-  const crypto = require('crypto')
   const sha1 = crypto.createHash('sha1').update(content).digest('hex')
   
   let textContent = await prisma.textContent.findUnique({
@@ -719,15 +760,32 @@ export async function updatePage(options: {
   const nextRevisionNumber = (page.revisions[0]?.revisionNumber || 0) + 1
   
   // Create new revision
+  const commentText = summary || 'Edit'
+  const commentHash = crypto.createHash('sha1').update(commentText).digest('hex')
+  const comment = await prisma.comment.upsert({
+    where: { hash: commentHash },
+    create: {
+      text: commentText,
+      hash: commentHash
+    },
+    update: {}
+  })
+
   const revision = await prisma.revision.create({
     data: {
       pageId: page.id,
       textId: textContent.id,
       actorId: actor.id,
-      summary: summary || 'Edit',
+      summary: commentText,
       revisionNumber: nextRevisionNumber,
       timestamp: new Date(),
-      isMinor
+      isMinor,
+      parentRevisionId: page.revisions[0]?.id,
+      commentId: comment.id,
+      byteSize: textContent.byteSize,
+      sha1,
+      contentModel: 'wikitext',
+      contentFormat: 'text/x-wiki'
     }
   })
   
@@ -736,7 +794,10 @@ export async function updatePage(options: {
     where: { id: page.id },
     data: {
       latestRevisionId: revision.id,
-      updatedAt: new Date()
+      updatedAt: new Date(),
+      length: textContent.byteSize,
+      linksUpdated: new Date(),
+      isNew: false
     }
   })
   

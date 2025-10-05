@@ -49,6 +49,13 @@ model Page {
   latestRevisionId String?
   isRedirect       Boolean           @default(false)
   redirectTarget   String?
+  isNew            Boolean           @default(true) @map("is_new")
+  random           Float             @default(dbgenerated("random()")) @map("page_random")
+  touched          DateTime?         @map("page_touched")
+  linksUpdated     DateTime?         @map("links_updated")
+  length           Int               @default(0) @map("page_len")
+  contentModel     String            @default("wikitext") @map("content_model")
+  lang             String?           @map("page_lang")
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   viewCount        Int               @default(0)
@@ -67,6 +74,7 @@ model Page {
   @@index([slug])
   @@index([namespaceId, title])
   @@index([updatedAt])
+  @@index([random])
 }
 
 model TextContent {
@@ -74,6 +82,7 @@ model TextContent {
   content   String
   sha1      String     @unique
   byteSize  Int
+  compression String?  @map("compression")
   revisions Revision[]
 
   @@index([sha1])
@@ -84,18 +93,40 @@ model Revision {
   pageId         String
   textId         String
   actorId        String
+  parentRevisionId String?
+  commentId      String?
   summary        String?        @db.VarChar(500)
   revisionNumber Int
   timestamp      DateTime       @default(now())
   isMinor        Boolean        @default(false)
+  byteSize       Int            @default(0) @map("rev_len")
+  sha1           String?        @map("rev_sha1")
+  deleted        Boolean        @default(false) @map("rev_deleted")
+  contentModel   String         @default("wikitext") @map("content_model")
+  contentFormat  String         @default("text/x-wiki") @map("content_format")
   recentChanges  RecentChange[]
   actor          Actor          @relation(fields: [actorId], references: [id])
   page           Page           @relation(fields: [pageId], references: [id], onDelete: Cascade)
   textContent    TextContent    @relation(fields: [textId], references: [id])
+  parentRevision Revision?      @relation("RevisionParent", fields: [parentRevisionId], references: [id])
+  childRevisions Revision[]     @relation("RevisionParent")
+  comment        Comment?       @relation("RevisionComment", fields: [commentId], references: [id])
 
   @@unique([pageId, revisionNumber])
   @@index([pageId, timestamp])
   @@index([timestamp])
+  @@index([sha1])
+}
+
+model Comment {
+  id        String    @id @default(cuid())
+  text      String
+  data      Json?
+  hash      String    @unique
+  revisions Revision[] @relation("RevisionComment")
+  media     Media[]   @relation("MediaDescription")
+
+  @@index([hash])
 }
 
 model Namespace {
@@ -204,9 +235,12 @@ model Media {
   archiveName   String?         @map("archive_name")
   deleted       Int             @default(0)
   descriptionId String?         @map("description_id")
+  uploadedByName String?        @map("uploaded_by_name")
+  currentVersion Int            @default(1) @map("current_version")
   uploadedAt    DateTime        @default(now()) @map("timestamp")
   uploadedById  String?
   uploadedBy    User?           @relation("MediaUploader", fields: [uploadedById], references: [id])
+  description   Comment?        @relation("MediaDescription", fields: [descriptionId], references: [id])
   archives      MediaArchive[]
   categories    MediaCategory[]
   revisions     MediaRevision[]
@@ -218,6 +252,7 @@ model Media {
   @@index([mediaType])
   @@index([majorMime])
   @@index([uploadedById])
+  @@index([uploadedByName])
 }
 
 model MediaArchive {
