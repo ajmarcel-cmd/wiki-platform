@@ -1,0 +1,337 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Actor {
+  id               String            @id @default(cuid())
+  userId           String?
+  name             String            @unique
+  createdAt        DateTime          @default(now())
+  user             User?             @relation(fields: [userId], references: [id])
+  mediaArchives    MediaArchive[]
+  pageRestrictions PageRestriction[]
+  recentChanges    RecentChange[]
+  revisions        Revision[]
+
+  @@index([userId])
+  @@index([name])
+}
+
+model User {
+  id             String          @id @default(cuid())
+  username       String          @unique
+  email          String?         @unique
+  displayName    String
+  passwordHash   String?
+  isAdmin        Boolean         @default(false)
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  lastLoginAt    DateTime?
+  actors         Actor[]
+  mediaUploads   Media[]         @relation("MediaUploader")
+  mediaRevisions MediaRevision[] @relation("MediaRevisionUploader")
+
+  @@index([username])
+  @@index([email])
+}
+
+model Page {
+  id               String            @id @default(cuid())
+  namespaceId      Int
+  title            String
+  displayTitle     String
+  slug             String            @unique
+  latestRevisionId String?
+  isRedirect       Boolean           @default(false)
+  redirectTarget   String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  viewCount        Int               @default(0)
+  mediaUsages      MediaUsage[]
+  namespace        Namespace         @relation(fields: [namespaceId], references: [id])
+  categories       PageCategory[]
+  linksFrom        PageLink[]        @relation("FromPage")
+  linksTo          PageLink[]        @relation("ToPage")
+  props            PageProps[]
+  restrictions     PageRestriction[]
+  templates        PageTemplate[]
+  recentChanges    RecentChange[]
+  revisions        Revision[]
+
+  @@unique([namespaceId, title])
+  @@index([slug])
+  @@index([namespaceId, title])
+  @@index([updatedAt])
+}
+
+model TextContent {
+  id        String     @id @default(cuid())
+  content   String
+  sha1      String     @unique
+  byteSize  Int
+  revisions Revision[]
+
+  @@index([sha1])
+}
+
+model Revision {
+  id             String         @id @default(cuid())
+  pageId         String
+  textId         String
+  actorId        String
+  summary        String?        @db.VarChar(500)
+  revisionNumber Int
+  timestamp      DateTime       @default(now())
+  isMinor        Boolean        @default(false)
+  recentChanges  RecentChange[]
+  actor          Actor          @relation(fields: [actorId], references: [id])
+  page           Page           @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  textContent    TextContent    @relation(fields: [textId], references: [id])
+
+  @@unique([pageId, revisionNumber])
+  @@index([pageId, timestamp])
+  @@index([timestamp])
+}
+
+model Namespace {
+  id          Int     @id @default(autoincrement())
+  name        String  @unique
+  displayName String
+  canonical   Boolean @default(false)
+  pages       Page[]
+
+  @@index([name])
+}
+
+model Category {
+  id          String          @id @default(cuid())
+  name        String          @unique
+  displayName String
+  slug        String          @unique
+  description String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  media       MediaCategory[]
+  pages       PageCategory[]
+
+  @@index([slug])
+}
+
+model PageCategory {
+  id            String   @id @default(cuid())
+  pageId        String
+  categoryId    String
+  sortKey       String?
+  sortKeyPrefix String?
+  addedAt       DateTime @default(now())
+  category      Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  page          Page     @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, categoryId])
+  @@index([categoryId, sortKey])
+  @@index([sortKeyPrefix])
+}
+
+model PageRestriction {
+  id        String    @id @default(cuid())
+  pageId    String
+  type      String
+  level     String
+  expiry    DateTime?
+  actorId   String?
+  createdAt DateTime  @default(now())
+  actor     Actor?    @relation(fields: [actorId], references: [id])
+  page      Page      @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@index([pageId])
+  @@index([type])
+  @@index([expiry])
+}
+
+model PageProps {
+  id        String  @id @default(cuid())
+  pageId    String
+  propName  String
+  propValue String?
+  sortKey   Float?
+  page      Page    @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, propName])
+  @@index([propName, sortKey])
+}
+
+model RecentChange {
+  id            String    @id @default(cuid())
+  timestamp     DateTime  @default(now())
+  actorId       String
+  pageId        String
+  revisionId    String?
+  type          String
+  oldRevisionId String?
+  oldLength     Int?
+  newLength     Int?
+  params        Json?
+  actor         Actor     @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  page          Page      @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  revision      Revision? @relation(fields: [revisionId], references: [id])
+
+  @@index([timestamp])
+  @@index([actorId])
+  @@index([pageId])
+  @@index([type])
+}
+
+model Media {
+  id            String          @id @default(cuid())
+  filename      String          @unique
+  displayName   String
+  storageKey    String
+  url           String?
+  byteSize      Int
+  width         Int?
+  height        Int?
+  bits          Int?
+  mediaType     String?         @map("media_type")
+  majorMime     String          @default("unknown") @map("major_mime")
+  minorMime     String          @default("unknown") @map("minor_mime")
+  metadata      Json?           @map("img_metadata")
+  sha1          String?
+  archiveName   String?         @map("archive_name")
+  deleted       Int             @default(0)
+  descriptionId String?         @map("description_id")
+  uploadedAt    DateTime        @default(now()) @map("timestamp")
+  uploadedById  String?
+  uploadedBy    User?           @relation("MediaUploader", fields: [uploadedById], references: [id])
+  archives      MediaArchive[]
+  categories    MediaCategory[]
+  revisions     MediaRevision[]
+  usages        MediaUsage[]
+
+  @@index([filename])
+  @@index([sha1])
+  @@index([uploadedAt])
+  @@index([mediaType])
+  @@index([majorMime])
+  @@index([uploadedById])
+}
+
+model MediaArchive {
+  id          String   @id @default(cuid())
+  mediaId     String   @map("media_id")
+  archiveName String   @map("archive_name")
+  deleted     Int      @default(0)
+  storageKey  String
+  size        Int
+  width       Int?
+  height      Int?
+  bits        Int?
+  metadata    Json?
+  majorMime   String   @map("major_mime")
+  minorMime   String   @map("minor_mime")
+  description String?
+  actorId     String?  @map("actor_id")
+  timestamp   DateTime @default(now())
+  sha1        String?
+  mediaType   String?  @map("media_type")
+  actor       Actor?   @relation(fields: [actorId], references: [id])
+  media       Media    @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+
+  @@index([mediaId])
+  @@index([sha1])
+  @@index([timestamp])
+  @@index([actorId])
+}
+
+model MediaCategory {
+  id         String   @id @default(cuid())
+  mediaId    String
+  categoryId String
+  sortKey    String?
+  addedAt    DateTime @default(now())
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  media      Media    @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+
+  @@unique([mediaId, categoryId])
+  @@index([categoryId, sortKey])
+}
+
+model MediaUsage {
+  id           String   @id @default(cuid())
+  mediaId      String
+  pageId       String
+  usageContext String?
+  addedAt      DateTime @default(now())
+  media        Media    @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  page         Page     @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@unique([mediaId, pageId])
+  @@index([mediaId])
+  @@index([pageId])
+}
+
+model MediaRevision {
+  id            String   @id @default(cuid())
+  mediaId       String
+  versionNumber Int
+  uploadedById  String?
+  uploadedAt    DateTime @default(now())
+  byteSize      Int
+  width         Int?
+  height        Int?
+  url           String?
+  comment       String?
+  media         Media    @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  uploadedBy    User?    @relation("MediaRevisionUploader", fields: [uploadedById], references: [id])
+
+  @@unique([mediaId, versionNumber])
+  @@index([uploadedAt])
+}
+
+model PageLink {
+  id       String  @id @default(cuid())
+  fromId   String
+  toId     String
+  linkText String?
+  fromPage Page    @relation("FromPage", fields: [fromId], references: [id], onDelete: Cascade)
+  toPage   Page    @relation("ToPage", fields: [toId], references: [id], onDelete: Cascade)
+
+  @@unique([fromId, toId])
+  @@index([fromId])
+  @@index([toId])
+}
+
+model PageTemplate {
+  id     String @id @default(cuid())
+  pageId String
+  name   String
+  params Json?
+  page   Page   @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@index([pageId])
+  @@index([name])
+}
+
+model SearchIndex {
+  id            String   @id @default(cuid())
+  pageId        String   @unique
+  titleVector   String
+  contentVector String
+  lastIndexed   DateTime @default(now())
+
+  @@index([lastIndexed])
+}
+
+model SiteConfig {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       String
+  description String?
+  updatedAt   DateTime @updatedAt
+
+  @@index([key])
+}
