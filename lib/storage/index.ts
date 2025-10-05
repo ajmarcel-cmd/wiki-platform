@@ -7,6 +7,8 @@ import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, Head
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
+import crypto from 'crypto'
+
 import { prisma } from '../db'
 import { getHashedStoragePath, getHashedArchivePath, getHashedThumbPath, getFileSha1, splitMimeType, getMediaType } from './hash-path'
 import { extractMetadata } from './metadata'
@@ -70,6 +72,59 @@ export interface MediaFile {
   metadata?: any
 }
 
+async function upsertCommentFromDescription(description?: string | null) {
+  if (!description || !description.trim()) {
+    return null
+  }
+
+  const hash = crypto.createHash('sha1').update(description).digest('hex')
+  return prisma.comment.upsert({
+    where: { hash },
+    create: {
+      text: description,
+      hash,
+    },
+    update: {},
+  })
+}
+
+async function resolveUploader(actorId?: string | null): Promise<{ uploaderId: string | null; uploaderName: string | null }> {
+  if (!actorId) {
+    return { uploaderId: null, uploaderName: null }
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: actorId },
+  })
+
+  if (user) {
+    return {
+      uploaderId: user.id,
+      uploaderName: user.displayName || user.username,
+    }
+  }
+
+  const actor = await prisma.actor.findUnique({
+    where: { id: actorId },
+    include: {
+      user: true,
+    },
+  })
+
+  if (actor) {
+    const uploaderName = actor.user?.displayName || actor.user?.username || actor.name
+    return {
+      uploaderId: actor.user?.id || actor.userId || null,
+      uploaderName,
+    }
+  }
+
+  return {
+    uploaderId: null,
+    uploaderName: actorId,
+  }
+}
+
 /**
  * Ensure local storage directory exists
  */
@@ -99,6 +154,9 @@ function getLocalFileUrl(storageKey: string): string {
  */
 async function uploadToLocalStorage(options: UploadOptions, isArchive: boolean = false): Promise<MediaFile> {
   try {
+    const descriptionComment = await upsertCommentFromDescription(options.description)
+    const { uploaderId, uploaderName } = await resolveUploader(options.actorId)
+
     // Generate storage path
     const storageKey = isArchive
       ? getHashedArchivePath(options.filename, `${Date.now()}!${options.filename}`)
@@ -137,6 +195,8 @@ async function uploadToLocalStorage(options: UploadOptions, isArchive: boolean =
     })
 
     if (existingMedia) {
+      const newVersionNumber = (existingMedia.currentVersion || 1) + 1
+
       // Move current version to archive
       await prisma.mediaArchive.create({
         data: {
@@ -172,8 +232,10 @@ async function uploadToLocalStorage(options: UploadOptions, isArchive: boolean =
           minorMime,
           metadata: extractedMetadata,
           sha1,
-          uploadedById: options.actorId,
-          descriptionId: options.description ? undefined : null,
+          uploadedById: uploaderId,
+          uploadedByName: uploaderName,
+          currentVersion: newVersionNumber,
+          descriptionId: descriptionComment?.id ?? existingMedia.descriptionId ?? null,
         },
       })
 
@@ -209,8 +271,10 @@ async function uploadToLocalStorage(options: UploadOptions, isArchive: boolean =
           minorMime,
           metadata: extractedMetadata,
           sha1,
-          uploadedById: options.actorId,
-          descriptionId: options.description ? undefined : null,
+          uploadedById: uploaderId,
+          uploadedByName: uploaderName,
+          currentVersion: 1,
+          descriptionId: descriptionComment?.id ?? null,
         },
       })
 
@@ -246,6 +310,9 @@ async function uploadToS3(options: UploadOptions, isArchive: boolean = false): P
   }
 
   try {
+    const descriptionComment = await upsertCommentFromDescription(options.description)
+    const { uploaderId, uploaderName } = await resolveUploader(options.actorId)
+
     // Generate storage path
     const storageKey = isArchive
       ? getHashedArchivePath(options.filename, `${Date.now()}!${options.filename}`)
@@ -297,6 +364,7 @@ async function uploadToS3(options: UploadOptions, isArchive: boolean = false): P
     })
 
     if (existingMedia) {
+      const newVersionNumber = (existingMedia.currentVersion || 1) + 1
       // Move current version to archive
       await prisma.mediaArchive.create({
         data: {
@@ -332,8 +400,10 @@ async function uploadToS3(options: UploadOptions, isArchive: boolean = false): P
           minorMime,
           metadata: extractedMetadata,
           sha1,
-          uploadedById: options.actorId,
-          descriptionId: options.description ? undefined : null,
+          uploadedById: uploaderId,
+          uploadedByName: uploaderName,
+          currentVersion: newVersionNumber,
+          descriptionId: descriptionComment?.id ?? existingMedia.descriptionId ?? null,
         },
       })
 
@@ -369,8 +439,10 @@ async function uploadToS3(options: UploadOptions, isArchive: boolean = false): P
           minorMime,
           metadata: extractedMetadata,
           sha1,
-          uploadedById: options.actorId,
-          descriptionId: options.description ? undefined : null,
+          uploadedById: uploaderId,
+          uploadedByName: uploaderName,
+          currentVersion: 1,
+          descriptionId: descriptionComment?.id ?? null,
         },
       })
 

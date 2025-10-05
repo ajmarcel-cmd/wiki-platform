@@ -3,7 +3,10 @@
  * Handles automatic updates when media files get new versions
  */
 
+import crypto from 'crypto'
+
 import { prisma } from './db'
+import { splitMimeType, getMediaType } from './storage/hash-path'
 
 /**
  * Update all page content that references a media file to use the latest version
@@ -40,6 +43,9 @@ export async function updateMediaReferencesInPages(mediaId: string): Promise<voi
       revisions: {
         orderBy: { revisionNumber: 'desc' },
         take: 1,
+        include: {
+          textContent: true,
+        },
       },
     },
   })
@@ -55,27 +61,66 @@ export async function updateMediaReferencesInPages(mediaId: string): Promise<voi
     }
 
     // Update the content to use the latest media version
+    const latestContent = latestRevision.textContent?.content || ''
     const updatedContent = updateImageReferencesInContent(
-      latestRevision.content,
+      latestContent,
       media.filename,
       media.url || ''
     )
 
     // Only update if content actually changed
-    if (updatedContent !== latestRevision.content) {
+    if (updatedContent !== latestContent) {
       console.log(`✏️  Updating content for page: ${page.slug}`)
       
       // Create a new revision with updated content
+      const systemActor = await prisma.actor.upsert({
+        where: { name: 'system' },
+        update: {},
+        create: {
+          name: 'system',
+          userId: null,
+        },
+      })
+
+      const sha1 = crypto.createHash('sha1').update(updatedContent).digest('hex')
+      let textContent = await prisma.textContent.findUnique({
+        where: { sha1 },
+      })
+
+      if (!textContent) {
+        textContent = await prisma.textContent.create({
+          data: {
+            content: updatedContent,
+            sha1,
+            byteSize: Buffer.byteLength(updatedContent, 'utf8'),
+          },
+        })
+      }
+
+      const commentText = `Updated image references to latest version of ${media.filename}`
+      const commentHash = crypto.createHash('sha1').update(commentText).digest('hex')
+      const comment = await prisma.comment.upsert({
+        where: { hash: commentHash },
+        create: {
+          text: commentText,
+          hash: commentHash,
+        },
+        update: {},
+      })
+
       const newRevision = await prisma.revision.create({
         data: {
           pageId: page.id,
-          content: updatedContent,
-          contentHash: generateContentHash(updatedContent),
+          textId: textContent.id,
+          actorId: systemActor.id,
+          summary: commentText,
           revisionNumber: latestRevision.revisionNumber + 1,
-          summary: `Updated image references to latest version of ${media.filename}`,
-          editorId: null, // System update
-          editorName: 'System',
-          byteSize: Buffer.byteLength(updatedContent, 'utf8'),
+          timestamp: new Date(),
+          isMinor: false,
+          parentRevisionId: latestRevision.id,
+          commentId: comment.id,
+          byteSize: textContent.byteSize,
+          sha1,
         },
       })
 
@@ -85,6 +130,9 @@ export async function updateMediaReferencesInPages(mediaId: string): Promise<voi
         data: {
           latestRevisionId: newRevision.id,
           updatedAt: new Date(),
+          length: textContent.byteSize,
+          linksUpdated: new Date(),
+          isNew: false,
         },
       })
 
@@ -149,14 +197,6 @@ function isMediaFileReference(url: string, filename: string): boolean {
 }
 
 /**
- * Generate a content hash for deduplication
- */
-function generateContentHash(content: string): string {
-  const crypto = require('crypto')
-  return crypto.createHash('sha256').update(content).digest('hex')
-}
-
-/**
  * Update media file to latest version and trigger content updates
  */
 export async function updateMediaToLatestVersion(mediaId: string, newVersionData: {
@@ -165,14 +205,18 @@ export async function updateMediaToLatestVersion(mediaId: string, newVersionData
   byteSize: number
   width?: number
   height?: number
-  mimeType: string
+  contentType: string
   versionNumber: number
   uploadedById: string
   comment?: string
+  sha1?: string
 }): Promise<void> {
   console.log(`🔄 Updating media ${mediaId} to version ${newVersionData.versionNumber}`)
   
   // Create new media revision
+  const [majorMime, minorMime] = splitMimeType(newVersionData.contentType)
+  const mediaType = getMediaType(newVersionData.contentType)
+
   const newRevision = await prisma.mediaRevision.create({
     data: {
       mediaId,
@@ -181,7 +225,6 @@ export async function updateMediaToLatestVersion(mediaId: string, newVersionData
       byteSize: newVersionData.byteSize,
       width: newVersionData.width,
       height: newVersionData.height,
-      mimeType: newVersionData.mimeType,
       versionNumber: newVersionData.versionNumber,
       uploadedById: newVersionData.uploadedById,
       comment: newVersionData.comment,
@@ -189,6 +232,10 @@ export async function updateMediaToLatestVersion(mediaId: string, newVersionData
   })
 
   // Update the main media record to point to the new version
+  const uploader = await prisma.user.findUnique({
+    where: { id: newVersionData.uploadedById },
+  })
+
   await prisma.media.update({
     where: { id: mediaId },
     data: {
@@ -197,8 +244,13 @@ export async function updateMediaToLatestVersion(mediaId: string, newVersionData
       byteSize: newVersionData.byteSize,
       width: newVersionData.width,
       height: newVersionData.height,
-      mimeType: newVersionData.mimeType,
+      majorMime,
+      minorMime,
+      mediaType,
       currentVersion: newVersionData.versionNumber,
+      sha1: newVersionData.sha1 ?? undefined,
+      uploadedById: newVersionData.uploadedById,
+      uploadedByName: uploader?.displayName || uploader?.username || null,
     },
   })
 
