@@ -69,6 +69,7 @@ model Page {
   templates        PageTemplate[]
   recentChanges    RecentChange[]
   revisions        Revision[]
+  categoryPage     Category?         @relation("CategoryPage")
 
   @@unique([namespaceId, title])
   @@index([slug])
@@ -145,12 +146,15 @@ model Category {
   displayName String
   slug        String          @unique
   description String?
+  pageId      String?         @unique
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
   media       MediaCategory[]
   pages       PageCategory[]
+  page        Page?           @relation("CategoryPage", fields: [pageId], references: [id])
 
   @@index([slug])
+  @@index([pageId])
 }
 
 model PageCategory {

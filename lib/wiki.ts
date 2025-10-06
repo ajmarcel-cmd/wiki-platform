@@ -3,9 +3,104 @@
  * All database queries for wiki pages and related content
  */
 
+import type { Prisma } from '@prisma/client'
 import { prisma } from './db'
 import crypto from 'crypto'
 import { createCachedFunction, CacheDurations } from './cache'
+
+export const DEFAULT_NAMESPACE_NAME = 'Main'
+const DEFAULT_NAMESPACE = DEFAULT_NAMESPACE_NAME
+const KNOWN_NAMESPACE_NAMES = new Set([
+  'Category',
+  'File',
+  'Template',
+  'Help',
+  'Portal',
+  'Project',
+  'Talk',
+  'User',
+  'Main'
+])
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+export function generatePageSlug(title: string, namespace: string = DEFAULT_NAMESPACE): string {
+  const base = slugify(title)
+  if (!namespace || namespace === DEFAULT_NAMESPACE) {
+    return base
+  }
+
+  const namespaceSlug = slugify(namespace)
+  if (!namespaceSlug) {
+    return base
+  }
+
+  return `${namespaceSlug}-${base}`
+}
+
+export function generateCategorySlug(name: string): string {
+  return slugify(name)
+}
+
+export async function normalizeTitle(
+  rawTitle: string
+): Promise<{ title: string; namespace: string; namespaceId: number; slug: string }> {
+  const trimmed = rawTitle.trim()
+
+  if (!trimmed) {
+    throw new Error('Title cannot be empty')
+  }
+
+  const parts = trimmed.split(':')
+  let namespaceName = DEFAULT_NAMESPACE
+  let title = trimmed
+  let namespaceRecord = await prisma.namespace.findUnique({
+    where: { name: DEFAULT_NAMESPACE },
+  })
+
+  if (parts.length > 1) {
+    const potentialNamespace = parts[0].trim()
+    const remainder = parts.slice(1).join(':').trim()
+
+    if (!remainder) {
+      throw new Error('Title cannot be empty')
+    }
+
+    const existingNamespace = await prisma.namespace.findUnique({
+      where: { name: potentialNamespace },
+    })
+
+    if (existingNamespace || KNOWN_NAMESPACE_NAMES.has(potentialNamespace)) {
+      namespaceName = existingNamespace?.name || potentialNamespace
+      namespaceRecord = existingNamespace ?? namespaceRecord
+      title = remainder
+    }
+  }
+
+  if (!namespaceRecord || namespaceRecord.name !== namespaceName) {
+    namespaceRecord = await prisma.namespace.upsert({
+      where: { name: namespaceName },
+      update: {},
+      create: {
+        name: namespaceName,
+        displayName: namespaceName,
+        canonical: namespaceName === DEFAULT_NAMESPACE,
+      },
+    })
+  }
+
+  return {
+    title,
+    namespace: namespaceRecord.name,
+    namespaceId: namespaceRecord.id,
+    slug: generatePageSlug(title, namespaceRecord.name)
+  }
+}
 
 export interface WikiPage {
   id: string
@@ -14,6 +109,7 @@ export interface WikiPage {
   displayTitle: string
   content: string
   namespace: string
+  namespaceId: number
   categories: Array<{ name: string; slug: string }>
   updatedAt: Date
   viewCount: number
@@ -26,13 +122,16 @@ export interface WikiPage {
   length: number
   contentModel: string
   lang: string | null
+  latestRevisionId: string | null
 }
 
 export interface WikiPageListItem {
+  id: string
   slug: string
   title: string
   displayTitle: string
   namespace: string
+  namespaceId: number
   updatedAt: Date
   viewCount: number
 }
@@ -73,6 +172,7 @@ async function _getPageBySlug(slug: string): Promise<WikiPage | null> {
     displayTitle: page.displayTitle,
     content: latestRevision.textContent.content,
     namespace: page.namespace.name,
+    namespaceId: page.namespace.id,
     categories: page.categories.map((pc) => ({
       name: pc.category.displayName,
       slug: pc.category.slug,
@@ -88,6 +188,7 @@ async function _getPageBySlug(slug: string): Promise<WikiPage | null> {
     length: page.length,
     contentModel: page.contentModel,
     lang: page.lang,
+    latestRevisionId: page.latestRevisionId,
   }
 }
 
@@ -126,10 +227,12 @@ async function _getAllPages(
 
   return {
     pages: pages.map((p) => ({
+      id: p.id,
       slug: p.slug,
       title: p.title,
       displayTitle: p.displayTitle,
       namespace: p.namespace.name,
+      namespaceId: p.namespace.id,
       updatedAt: p.updatedAt,
       viewCount: p.viewCount,
     })),
@@ -173,10 +276,12 @@ async function _getRecentPages(
 
   return {
     pages: pages.map((p) => ({
+      id: p.id,
       slug: p.slug,
       title: p.title,
       displayTitle: p.displayTitle,
       namespace: p.namespace.name,
+      namespaceId: p.namespace.id,
       updatedAt: p.updatedAt,
       viewCount: p.viewCount,
     })),
@@ -223,10 +328,12 @@ export async function searchPages(query: string, limit: number = 20): Promise<Wi
   })
 
   return pages.map((p) => ({
+    id: p.id,
     slug: p.slug,
     title: p.title,
     displayTitle: p.displayTitle,
     namespace: p.namespace.name,
+    namespaceId: p.namespace.id,
     updatedAt: p.updatedAt,
     viewCount: p.viewCount,
   }))
@@ -273,10 +380,12 @@ export async function getPagesByCategory(
 
   return {
     pages: pageCategories.map((pc) => ({
+      id: pc.page.id,
       slug: pc.page.slug,
       title: pc.page.title,
       displayTitle: pc.page.displayTitle,
       namespace: pc.page.namespace.name,
+      namespaceId: pc.page.namespace.id,
       updatedAt: pc.page.updatedAt,
       viewCount: pc.page.viewCount,
     })),
@@ -349,6 +458,10 @@ export async function getPageRevisions(slug: string, limit: number = 50) {
     where: { pageId: page.id },
     orderBy: { revisionNumber: 'desc' },
     take: limit,
+    include: {
+      actor: true,
+      comment: true,
+    },
   })
 }
 
@@ -476,18 +589,460 @@ export async function getMediaCategories(mediaId: string) {
   }))
 }
 
+export interface SiteStats {
+  pages: number
+  articles: number
+  files: number
+  categories: number
+  edits: number
+  activeUsers: number
+}
+
+export interface NamespaceInfo {
+  id: number
+  name: string
+  displayName: string
+  canonical: boolean
+}
+
+export async function getNamespaces(): Promise<NamespaceInfo[]> {
+  const namespaces = await prisma.namespace.findMany({
+    orderBy: {
+      id: 'asc',
+    },
+  })
+
+  return namespaces.map((namespace) => ({
+    id: namespace.id,
+    name: namespace.name,
+    displayName: namespace.displayName,
+    canonical: namespace.canonical,
+  }))
+}
+
+export async function getSiteStats(): Promise<SiteStats> {
+  const [pages, articles, files, categories, edits, activeUsers] = await Promise.all([
+    prisma.page.count(),
+    prisma.page.count({
+      where: {
+        namespace: {
+          name: DEFAULT_NAMESPACE,
+        },
+      },
+    }),
+    prisma.media.count(),
+    prisma.category.count(),
+    prisma.revision.count(),
+    prisma.user.count({
+      where: {
+        isActive: true,
+      },
+    }),
+  ])
+
+  return {
+    pages,
+    articles,
+    files,
+    categories,
+    edits,
+    activeUsers,
+  }
+}
+
+export interface PageListResult {
+  items: WikiPageListItem[]
+  continue?: string
+}
+
+export async function listAllPagesForApi(
+  options: {
+    limit?: number
+    continueFrom?: string
+    prefix?: string
+  } = {}
+): Promise<PageListResult> {
+  const { limit = 50, continueFrom, prefix } = options
+  const pageSize = Math.min(Math.max(limit, 1), 500)
+
+  const query: Prisma.PageFindManyArgs = {
+    orderBy: { slug: 'asc' },
+    take: pageSize + 1,
+    include: {
+      namespace: true,
+    },
+  }
+
+  if (continueFrom) {
+    query.cursor = { slug: continueFrom }
+    query.skip = 1
+  }
+
+  if (prefix) {
+    query.where = {
+      slug: {
+        startsWith: slugify(prefix),
+      },
+    }
+  }
+
+  const pages = await prisma.page.findMany(query)
+  const hasMore = pages.length > pageSize
+  const items = hasMore ? pages.slice(0, pageSize) : pages
+  const nextContinue = hasMore ? pages[pageSize].slug : undefined
+
+  return {
+    items: items.map((p) => ({
+      id: p.id,
+      slug: p.slug,
+      title: p.title,
+      displayTitle: p.displayTitle,
+      namespace: p.namespace.name,
+      namespaceId: p.namespace.id,
+      updatedAt: p.updatedAt,
+      viewCount: p.viewCount,
+    })),
+    continue: nextContinue,
+  }
+}
+
+export interface CategoryListItem {
+  slug: string
+  name: string
+  displayName: string
+  description: string | null
+  pageCount: number
+  mediaCount: number
+}
+
+export async function listAllCategoriesForApi(
+  options: {
+    limit?: number
+    continueFrom?: string
+    prefix?: string
+  } = {}
+): Promise<{ items: CategoryListItem[]; continue?: string }> {
+  const { limit = 100, continueFrom, prefix } = options
+  const pageSize = Math.min(Math.max(limit, 1), 500)
+
+  const query: Prisma.CategoryFindManyArgs = {
+    orderBy: { slug: 'asc' },
+    take: pageSize + 1,
+    include: {
+      _count: {
+        select: {
+          pages: true,
+          media: true,
+        },
+      },
+    },
+  }
+
+  if (continueFrom) {
+    query.cursor = { slug: continueFrom }
+    query.skip = 1
+  }
+
+  if (prefix) {
+    query.where = {
+      slug: {
+        startsWith: generateCategorySlug(prefix),
+      },
+    }
+  }
+
+  const categories = await prisma.category.findMany(query)
+  const hasMore = categories.length > pageSize
+  const items = hasMore ? categories.slice(0, pageSize) : categories
+  const nextContinue = hasMore ? categories[pageSize].slug : undefined
+
+  return {
+    items: items.map((category) => ({
+      slug: category.slug,
+      name: category.name,
+      displayName: category.displayName,
+      description: category.description ?? null,
+      pageCount: category._count.pages,
+      mediaCount: category._count.media,
+    })),
+    continue: nextContinue,
+  }
+}
+
+export interface CategoryTreeNode {
+  slug: string
+  name: string
+  displayName: string
+  description: string | null
+  pageCount: number
+  mediaCount: number
+  parents: string[]
+  subcategories: CategoryTreeNode[]
+}
+
+export async function getCategoryTree(): Promise<CategoryTreeNode[]> {
+  const categories = await prisma.category.findMany({
+    include: {
+      _count: {
+        select: {
+          pages: true,
+          media: true,
+        },
+      },
+      page: {
+        include: {
+          namespace: true,
+        },
+      },
+      pages: {
+        include: {
+          page: {
+            include: {
+              namespace: true,
+            },
+          },
+        },
+      },
+    },
+    orderBy: {
+      displayName: 'asc',
+    },
+  })
+
+  type CategoryMetadata = {
+    slug: string
+    name: string
+    displayName: string
+    description: string | null
+    pageCount: number
+    mediaCount: number
+    parents: string[]
+  }
+
+  const metadata = new Map<string, CategoryMetadata>()
+  const categoryByPageId = new Map<string, string>()
+
+  const ensureMetadata = (
+    slug: string,
+    fallback: Partial<CategoryMetadata> = {}
+  ): CategoryMetadata => {
+    if (!metadata.has(slug)) {
+      metadata.set(slug, {
+        slug,
+        name: fallback.name ?? slug,
+        displayName: fallback.displayName ?? fallback.name ?? slug,
+        description: fallback.description ?? null,
+        pageCount: fallback.pageCount ?? 0,
+        mediaCount: fallback.mediaCount ?? 0,
+        parents: fallback.parents ?? [],
+      })
+    }
+
+    return metadata.get(slug)!
+  }
+
+  for (const category of categories) {
+    const meta = ensureMetadata(category.slug, {
+      name: category.name,
+      displayName: category.displayName,
+      description: category.description ?? null,
+      pageCount: category._count.pages,
+      mediaCount: category._count.media,
+    })
+
+    // Ensure counts are up to date if the category already existed as a placeholder
+    meta.name = category.name
+    meta.displayName = category.displayName
+    meta.description = category.description ?? null
+    meta.pageCount = category._count.pages
+    meta.mediaCount = category._count.media
+
+    if (category.pageId) {
+      categoryByPageId.set(category.pageId, category.slug)
+    }
+  }
+
+  const parentToChildren = new Map<string, Set<string>>()
+  const childToParents = new Map<string, Set<string>>()
+
+  const registerRelationship = (parentSlug: string, childSlug: string) => {
+    if (!parentToChildren.has(parentSlug)) {
+      parentToChildren.set(parentSlug, new Set())
+    }
+    parentToChildren.get(parentSlug)!.add(childSlug)
+
+    if (!childToParents.has(childSlug)) {
+      childToParents.set(childSlug, new Set())
+    }
+    childToParents.get(childSlug)!.add(parentSlug)
+  }
+
+  for (const category of categories) {
+    for (const membership of category.pages) {
+      const page = membership.page
+
+      if (!page || page.namespace?.name !== 'Category') {
+        continue
+      }
+
+      let childSlug = categoryByPageId.get(page.id)
+
+      if (!childSlug) {
+        childSlug = generateCategorySlug(page.title)
+        ensureMetadata(childSlug, {
+          name: page.title,
+          displayName: page.displayTitle,
+        })
+      }
+
+      registerRelationship(category.slug, childSlug)
+    }
+  }
+
+  for (const [childSlug, parents] of childToParents.entries()) {
+    const meta = ensureMetadata(childSlug)
+    meta.parents = Array.from(parents).sort((a, b) => {
+      const parentA = ensureMetadata(a)
+      const parentB = ensureMetadata(b)
+      return parentA.displayName.localeCompare(parentB.displayName)
+    })
+  }
+
+  const buildNode = (slug: string, lineage: Set<string>): CategoryTreeNode => {
+    const meta = ensureMetadata(slug)
+    const nextLineage = new Set(lineage)
+    nextLineage.add(slug)
+
+    const childSlugs = parentToChildren.get(slug)
+    const subcategories: CategoryTreeNode[] = []
+
+    if (childSlugs) {
+      const sortedChildren = Array.from(childSlugs).sort((a, b) => {
+        const childA = ensureMetadata(a)
+        const childB = ensureMetadata(b)
+        return childA.displayName.localeCompare(childB.displayName)
+      })
+
+      for (const childSlug of sortedChildren) {
+        if (nextLineage.has(childSlug)) {
+          continue
+        }
+
+        subcategories.push(buildNode(childSlug, nextLineage))
+      }
+    }
+
+    return {
+      slug: meta.slug,
+      name: meta.name,
+      displayName: meta.displayName,
+      description: meta.description,
+      pageCount: meta.pageCount,
+      mediaCount: meta.mediaCount,
+      parents: meta.parents,
+      subcategories,
+    }
+  }
+
+  const rootSlugs = Array.from(metadata.keys()).filter((slug) => {
+    const parents = childToParents.get(slug)
+    return !parents || parents.size === 0
+  })
+
+  const sortedRoots = rootSlugs.sort((a, b) => {
+    const rootA = ensureMetadata(a)
+    const rootB = ensureMetadata(b)
+    return rootA.displayName.localeCompare(rootB.displayName)
+  })
+
+  return sortedRoots.map((slug) => buildNode(slug, new Set()))
+}
+
+export interface RecentChangeItem {
+  id: string
+  type: string
+  timestamp: Date
+  actorId: string
+  pageId: string
+  pageTitle: string
+  pageSlug: string
+  namespaceId: number
+  namespace: string
+  revisionId?: string | null
+  oldRevisionId?: string | null
+  oldLength?: number | null
+  newLength?: number | null
+}
+
+export async function getRecentChanges(
+  options: {
+    limit?: number
+    continueFrom?: string
+  } = {}
+): Promise<{ items: RecentChangeItem[]; continue?: string }> {
+  const { limit = 50, continueFrom } = options
+  const pageSize = Math.min(Math.max(limit, 1), 500)
+
+  const where: Prisma.RecentChangeWhereInput | undefined = continueFrom
+    ? {
+        timestamp: {
+          lt: new Date(continueFrom),
+        },
+      }
+    : undefined
+
+  const changes = await prisma.recentChange.findMany({
+    where,
+    orderBy: [
+      { timestamp: 'desc' },
+      { id: 'desc' },
+    ],
+    take: pageSize + 1,
+    include: {
+      page: {
+        include: {
+          namespace: true,
+        },
+      },
+    },
+  })
+
+  const hasMore = changes.length > pageSize
+  const items = hasMore ? changes.slice(0, pageSize) : changes
+  const nextContinue = hasMore ? changes[pageSize].timestamp.toISOString() : undefined
+
+  return {
+    items: items.map((change) => ({
+      id: change.id,
+      type: change.type,
+      timestamp: change.timestamp,
+      actorId: change.actorId,
+      pageId: change.pageId,
+      pageTitle: change.page?.title ?? '',
+      pageSlug: change.page?.slug ?? '',
+      namespaceId: change.page?.namespace?.id ?? 0,
+      namespace: change.page?.namespace?.name ?? DEFAULT_NAMESPACE,
+      revisionId: change.revisionId,
+      oldRevisionId: change.oldRevisionId,
+      oldLength: change.oldLength,
+      newLength: change.newLength,
+    })),
+    continue: nextContinue,
+  }
+}
+
 /**
  * Link categories to a page
  */
 export async function linkCategoriesToPage(pageId: string, categoryNames: string[]) {
   for (const categoryName of categoryNames) {
     // Find or create category
-    const slug = categoryName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-    
+    const slug = generateCategorySlug(categoryName)
+
     let category = await prisma.category.findUnique({
       where: { slug }
     })
-    
+
     if (!category) {
       category = await prisma.category.create({
         data: {
@@ -544,7 +1099,7 @@ export async function createPage(options: {
   }
   
   // Generate slug from title
-  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+  const slug = generatePageSlug(title, namespaceRecord.name)
   
   // Check if page already exists
   const existingPage = await prisma.page.findUnique({
@@ -656,6 +1211,28 @@ export async function createPage(options: {
     }
   })
 
+  if (namespaceRecord.name === 'Category') {
+    const categorySlug = generateCategorySlug(title)
+    const summaryData = summary ?? undefined
+
+    await prisma.category.upsert({
+      where: { slug: categorySlug },
+      update: {
+        name: title,
+        displayName: title,
+        ...(summary !== undefined ? { description: summaryData } : {}),
+        pageId: page.id
+      },
+      create: {
+        name: title,
+        displayName: title,
+        slug: categorySlug,
+        description: summary ?? null,
+        pageId: page.id
+      }
+    })
+  }
+
   // Create recent change entry
   await prisma.recentChange.create({
     data: {
@@ -700,6 +1277,7 @@ export async function updatePage(options: {
   const page = await prisma.page.findUnique({
     where: { slug },
     include: {
+      namespace: true,
       revisions: {
         orderBy: { revisionNumber: 'desc' },
         take: 1,
@@ -833,6 +1411,28 @@ export async function updatePage(options: {
     await linkCategoriesToPage(page.id, categories)
   }
   
+  if (page.namespace.name === 'Category') {
+    const categorySlug = generateCategorySlug(page.title)
+    const summaryData = summary ?? undefined
+
+    await prisma.category.upsert({
+      where: { slug: categorySlug },
+      update: {
+        name: page.title,
+        displayName: page.displayTitle,
+        ...(summary !== undefined ? { description: summaryData } : {}),
+        pageId: page.id
+      },
+      create: {
+        name: page.title,
+        displayName: page.displayTitle,
+        slug: categorySlug,
+        description: summary ?? null,
+        pageId: page.id
+      }
+    })
+  }
+
   // Return the updated page
   return _getPageBySlug(slug)
 }

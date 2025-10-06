@@ -1,5 +1,5 @@
 import Link from 'next/link'
-import { getAllCategories } from '@/lib/wiki'
+import { getAllCategories, getCategoryTree, type CategoryTreeNode } from '@/lib/wiki'
 
 export const metadata = {
   title: 'Categories - Wiki',
@@ -7,7 +7,10 @@ export const metadata = {
 }
 
 export default async function CategoriesPage() {
-  const categories = await getAllCategories()
+  const [categories, categoryTree] = await Promise.all([
+    getAllCategories(),
+    getCategoryTree(),
+  ])
 
   // Group categories by first letter
   const groupedCategories = categories.reduce((acc, category) => {
@@ -26,8 +29,19 @@ export default async function CategoriesPage() {
       <h1 className="text-4xl font-bold mb-6">Categories</h1>
       
       <div className="mb-6 text-sm text-gray-600">
-        {categories.length} {categories.length === 1 ? 'category' : 'categories'}
+        {categories.length} {categories.length === 1 ? 'category' : 'categories'} total
       </div>
+
+      <section className="mb-12">
+        <h2 className="text-2xl font-bold mb-4 text-gray-700">Category Tree</h2>
+        {categoryTree.length === 0 ? (
+          <p className="text-gray-500">No categories have been created yet.</p>
+        ) : (
+          <div className="bg-white border rounded-lg p-6">
+            <CategoryTree nodes={categoryTree} />
+          </div>
+        )}
+      </section>
 
       <div className="space-y-8">
         {letters.map((letter) => (
@@ -51,5 +65,38 @@ export default async function CategoriesPage() {
         ))}
       </div>
     </div>
+  )
+}
+
+function CategoryTree({ nodes, depth = 0 }: { nodes: CategoryTreeNode[]; depth?: number }) {
+  if (!nodes || nodes.length === 0) {
+    return null
+  }
+
+  return (
+    <ul className={depth === 0 ? 'space-y-3' : 'space-y-3 border-l border-gray-200 pl-4 mt-3'}>
+      {nodes.map((node) => (
+        <li key={`${depth}-${node.slug}`}>
+          <div className="flex items-start gap-2">
+            <span className="mt-1 h-2 w-2 rounded-full bg-blue-500" aria-hidden />
+            <div>
+              <Link
+                href={`/category/${node.slug}`}
+                className="font-medium text-blue-600 hover:text-blue-800"
+              >
+                {node.displayName}
+              </Link>
+              <div className="text-xs text-gray-500">
+                {node.pageCount} {node.pageCount === 1 ? 'page' : 'pages'}
+                {node.mediaCount > 0 && ` • ${node.mediaCount} ${node.mediaCount === 1 ? 'file' : 'files'}`}
+              </div>
+            </div>
+          </div>
+          {node.subcategories.length > 0 && (
+            <CategoryTree nodes={node.subcategories} depth={depth + 1} />
+          )}
+        </li>
+      ))}
+    </ul>
   )
 }
