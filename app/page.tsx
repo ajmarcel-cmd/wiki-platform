@@ -1,11 +1,16 @@
 import Link from "next/link";
-import { getAllPages, getAllCategories } from "@/lib/wiki";
+import { getAllCategories, getRecentPages, getSiteStats } from "@/lib/wiki";
 
 export default async function Home() {
-  const [pagesData, categories] = await Promise.all([
-    getAllPages(1, 10),
+  const [stats, recent, categories] = await Promise.all([
+    getSiteStats(),
+    getRecentPages(1, 12),
     getAllCategories(),
   ]);
+
+  const topCategories = [...categories]
+    .sort((a, b) => b._count.pages - a._count.pages)
+    .slice(0, 15);
 
   return (
     <div className="container mx-auto px-4 py-12">
@@ -13,7 +18,7 @@ export default async function Home() {
       <div className="text-center mb-16">
         <h1 className="text-5xl font-bold mb-4">Welcome to Wiki</h1>
         <p className="text-xl text-gray-600 mb-8">
-          A scalable, read-only wiki platform built with Next.js
+          A scalable MediaWiki-compatible platform powered by Next.js
         </p>
         <div className="flex gap-4 justify-center">
           <Link
@@ -32,23 +37,40 @@ export default async function Home() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-16">
-        <div className="bg-white p-6 rounded-lg border text-center">
-          <div className="text-3xl font-bold text-blue-600 mb-2">
-            {pagesData.total.toLocaleString()}
-          </div>
-          <div className="text-gray-600">Total Pages</div>
-        </div>
-        <div className="bg-white p-6 rounded-lg border text-center">
-          <div className="text-3xl font-bold text-green-600 mb-2">
-            {categories.length.toLocaleString()}
-          </div>
-          <div className="text-gray-600">Categories</div>
-        </div>
-        <div className="bg-white p-6 rounded-lg border text-center">
-          <div className="text-3xl font-bold text-purple-600 mb-2">∞</div>
-          <div className="text-gray-600">Scalability</div>
-        </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-16">
+        <StatCard
+          label="Total Pages"
+          value={stats.pages}
+          accent="text-blue-600"
+        />
+        <StatCard
+          label="Articles"
+          value={stats.articles}
+          accent="text-emerald-600"
+        />
+        <StatCard
+          label="Categories"
+          value={stats.categories}
+          accent="text-purple-600"
+        />
+        <StatCard
+          label="Media Files"
+          value={stats.files}
+          accent="text-orange-600"
+        />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-16">
+        <StatCard
+          label="Total Edits"
+          value={stats.edits}
+          accent="text-blue-500"
+        />
+        <StatCard
+          label="Active Contributors"
+          value={stats.activeUsers}
+          accent="text-green-500"
+        />
       </div>
 
       {/* Recent Pages */}
@@ -63,7 +85,7 @@ export default async function Home() {
           </Link>
         </div>
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {pagesData.pages.slice(0, 6).map((page) => (
+          {recent.pages.map((page) => (
             <Link
               key={page.slug}
               href={`/wiki/${page.slug}`}
@@ -91,21 +113,18 @@ export default async function Home() {
           </Link>
         </div>
         <div className="flex flex-wrap gap-3">
-          {categories
-            .sort((a, b) => b._count.pages - a._count.pages)
-            .slice(0, 15)
-            .map((category) => (
-              <Link
-                key={category.slug}
-                href={`/category/${category.slug}`}
-                className="px-4 py-2 bg-white border rounded-lg hover:border-blue-500 hover:shadow-md transition-all"
-              >
-                <div className="font-medium">{category.displayName}</div>
-                <div className="text-xs text-gray-500">
-                  {category._count.pages} pages • {category._count.media} media
-                </div>
-              </Link>
-            ))}
+          {topCategories.map((category) => (
+            <Link
+              key={category.slug}
+              href={`/category/${category.slug}`}
+              className="px-4 py-2 bg-white border rounded-lg hover:border-blue-500 hover:shadow-md transition-all"
+            >
+              <div className="font-medium">{category.displayName}</div>
+              <div className="text-xs text-gray-500">
+                {category._count.pages} pages • {category._count.media} media
+              </div>
+            </Link>
+          ))}
         </div>
       </div>
 
@@ -122,10 +141,10 @@ export default async function Home() {
               <strong>Database:</strong> PostgreSQL with logical sharding support
             </li>
             <li>
-              <strong>Caching:</strong> Next.js built-in caching (Redis-ready)
+              <strong>Caching:</strong> Next.js caching with Redis-ready adapters
             </li>
             <li>
-              <strong>Search:</strong> Full-text search (Meilisearch-ready)
+              <strong>Search:</strong> Full-text search with Meilisearch-ready index
             </li>
             <li>
               <strong>Deployment:</strong> Optimized for Vercel free tier or any
@@ -134,6 +153,23 @@ export default async function Home() {
           </ul>
         </div>
       </div>
+    </div>
+  );
+}
+
+interface StatCardProps {
+  label: string;
+  value: number;
+  accent: string;
+}
+
+function StatCard({ label, value, accent }: StatCardProps) {
+  return (
+    <div className="bg-white p-6 rounded-lg border text-center">
+      <div className={`text-3xl font-bold mb-2 ${accent}`}>
+        {value.toLocaleString()}
+      </div>
+      <div className="text-gray-600">{label}</div>
     </div>
   );
 }

@@ -50,18 +50,22 @@ export default async function WikiPage({ params }: PageProps) {
   const context = await getPageContext(slug)
   
   // Parse content
-  const { html, categories, tableOfContents } = await parseWikiContent(page.content, context)
+  const { html, categories: parsedCategories, tableOfContents } = await parseWikiContent(page.content, context)
+
+  const categoryLinks = page.categories.length > 0
+    ? page.categories.map((category) => ({ name: category.name, slug: category.slug }))
+    : parsedCategories.map((name) => ({
+        name,
+        slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''),
+      }))
 
   return (
     <div className="container mx-auto px-4 py-8">
       <div className="max-w-5xl mx-auto">
-        <WikiContent 
-          html={html} 
-          title={page.displayTitle} 
-          categories={categories.map(name => ({
-            name,
-            slug: name.toLowerCase().replace(/\s+/g, '-')
-          }))}
+        <WikiContent
+          html={html}
+          title={page.displayTitle}
+          categories={categoryLinks}
           tableOfContents={tableOfContents}
         />
         
